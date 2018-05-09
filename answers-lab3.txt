@@ -1,0 +1,52 @@
+1.	Each exception/interrupt needs its own individual handler function in order 
+	to maintain privilege isolation and protect the kernel. The handler 
+	functions specify specific sections of code that have exclusive privilege 
+	to deal with each particular type of exception/interrupt, so malicious 
+	user environments can't harm the kernel. 
+
+2.	Nothing special special had to be done to make user/softint behave 
+	correctly. When the program attempts to invoke int $14, the kernel checks 
+	its privilege and finds it doesn't have the proper CPL to make the 
+	invocation. Once the kernels knows this, it raises a general protection 
+	fault instead because a user-level program tried to take a kernel-level 
+	action. Allowing softint's int $14 instruction would give user programs
+	access to the kernel's page fault handler which is a major security breach. 
+
+3.	The break point test case will generate a general protection fault if its 
+	corresponding entry in the IDT was set with a DPL of 0. Initializing its DPL
+	to 0 only allows the kernel to invoke a break point fault, so the DPL needs 
+	to be initialized to 3 in order to allow user environments to invoke it. 
+
+4.	These mechanisms are needed to protect the kernel from user code (such as 
+	softint) while still allowing it to request higher level services via system
+	calls and break points. 
+
+--------------------------------------------------------------------------------
+
+Challenge - Modifying trapentry.S to automatically generate a table for trap.c
+
+In order to clean up trap_init() in trap.c, I modified the TRAPHANDLER and 
+TRAPHANDLER_NOEC macros to save each handler's function by adding:
+
+.data;		\
+.long name;	\
+
+to each macro's declaration. Then, I turned all the macro calls into a single
+global variable by defining a data section before the original text section and 
+declaring handlers as a global variable:
+
+.data
+.globl handlers
+handlers:
+.text
+
+Finally, I deleted all the dummy function declarations I originally had in 
+trap_init() and replaced them with a single for loop that accomplishes the same
+thing in a much more concise way by using the global variable defined earlier:
+
+extern void *handlers[22];
+int i = 0;
+for (i; i <= 19; i++) {
+if (i != 9 && i != 15)
+  SETGATE(idt[i], 0, GD_KT, handlers[i], 0);
+}
