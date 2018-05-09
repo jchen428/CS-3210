@@ -67,6 +67,9 @@ duppage(envid_t envid, unsigned pn)
   uint32_t perm = PTE_P | PTE_U;
   void *pgAddr = (void *)(pn * PGSIZE);
 
+  if (uvpt[pn] & PTE_SHARE)
+    return sys_page_map(0, pgAddr, envid, pgAddr, uvpt[pn] & PTE_SYSCALL);
+
   if ((uvpt[pn] & PTE_W) || (uvpt[pn] & PTE_COW)) {
     perm |= PTE_COW;
 
@@ -75,7 +78,7 @@ duppage(envid_t envid, unsigned pn)
     else if (sys_page_map(0, pgAddr, 0, pgAddr, perm) < 0)
       panic("second COW sys_page_map() failed in duppage()");
   } else if (sys_page_map(0, pgAddr, envid, pgAddr, perm) < 0) {
-      panic("non-COW sys_page_map() failed in duppage()");
+    panic("non-COW sys_page_map() failed in duppage()");
   }
 
   return 0;

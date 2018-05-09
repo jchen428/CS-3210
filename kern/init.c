@@ -55,23 +55,31 @@ i386_init(void)
   // Starting non-boot CPUs
   boot_aps();
 
+  // Start fs.
+  ENV_CREATE(fs_fs, ENV_TYPE_FS);
+
 #if defined(TEST)
   // Don't touch -- used by grading script!
   ENV_CREATE(TEST, ENV_TYPE_USER);
 #else
   // Touch all you want.
+  ENV_CREATE(user_icode, ENV_TYPE_USER);
+
   /*ENV_CREATE(user_yield, ENV_TYPE_USER);
   ENV_CREATE(user_yield, ENV_TYPE_USER);
   ENV_CREATE(user_yield, ENV_TYPE_USER);*/
 
   // Lab 4 priority scheduling challenge
-  ENV_CREATE_WITH_PRIORITY(user_yield, ENV_TYPE_USER, 50);  //0
+  /*ENV_CREATE_WITH_PRIORITY(user_yield, ENV_TYPE_USER, 50);  //0
   ENV_CREATE_WITH_PRIORITY(user_yield, ENV_TYPE_USER, 2);   //1
   ENV_CREATE_WITH_PRIORITY(user_yield, ENV_TYPE_USER, 68);  //2
   ENV_CREATE_WITH_PRIORITY(user_yield, ENV_TYPE_USER, 69);  //3
-  ENV_CREATE_WITH_PRIORITY(user_yield, ENV_TYPE_USER, 43);  //4
+  ENV_CREATE_WITH_PRIORITY(user_yield, ENV_TYPE_USER, 43);*/  //4
   // -----------------------------------
 #endif  // TEST*
+
+  // Should not be necessary - drains keyboard because interrupt has given up.
+  kbd_intr();
 
   // Schedule and run the first user environment!
   sched_yield();

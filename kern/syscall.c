@@ -4,6 +4,7 @@
 #include <inc/error.h>
 #include <inc/string.h>
 #include <inc/assert.h>
+#include <inc/elf.h>
 
 #include <kern/env.h>
 #include <kern/pmap.h>
@@ -56,10 +57,6 @@ sys_env_destroy(envid_t envid)
 
   if ((r = envid2env(envid, &e, 1)) < 0)
     return r;
-  if (e == curenv)
-    cprintf("[%08x] exiting gracefully\n", curenv->env_id);
-  else
-    cprintf("[%08x] destroying %08x\n", curenv->env_id, e->env_id);
   env_destroy(e);
   return 0;
 }
@@ -125,6 +122,31 @@ sys_env_set_status(envid_t envid, int status)
     env->env_status = status;
     return 0;
   }
+}
+
+// Set envid's trap frame to 'tf'.
+// tf is modified to make sure that user environments always run at code
+// protection level 3 (CPL 3) with interrupts enabled.
+//
+// Returns 0 on success, < 0 on error.  Errors are:
+//	-E_BAD_ENV if environment envid doesn't currently exist,
+//		or the caller doesn't have permission to change envid.
+static int
+sys_env_set_trapframe(envid_t envid, struct Trapframe *tf)
+{
+  // LAB 5: Your code here. -- DONE
+  // Remember to check whether the user has supplied us with a good
+  // address!
+  struct Env *env;
+
+  if (envid2env(envid, &env, 1) < 0)
+    return -E_BAD_ENV;
+
+  user_mem_assert(env, tf, sizeof(struct Trapframe), PTE_W);
+  env->env_tf = *tf;
+  env->env_tf.tf_eflags |= FL_IF;
+
+  return 0;
 }
 
 // Set the page fault upcall for 'envid' by modifying the corresponding struct
@@ -374,6 +396,47 @@ sys_ipc_recv(void *dstva)
   return 0;
 }
 
+static int
+sys_exec(uint32_t eip, uint32_t esp, void *_ph, uint32_t phnum)
+{
+  struct Proghdr *ph = (struct Proghdr *)_ph; 
+  struct PageInfo *pg;
+  int i, perm;
+  void *tempRegion = TEMPEXEC;
+  uint32_t curVA, endVA;
+
+  curenv->env_tf.tf_eip = eip;
+  curenv->env_tf.tf_esp = esp;
+
+  for (i = 0; i < phnum; i++, ph++) {
+    if (ph->p_type != ELF_PROG_LOAD)
+      continue;
+    perm = PTE_P | PTE_U;
+    if (ph->p_flags & ELF_PROG_FLAG_WRITE)
+      perm |= PTE_W;
+
+    curVA = ROUNDDOWN(ph->p_va, PGSIZE);
+    endVA = ROUNDUP(ph->p_va + ph->p_memsz, PGSIZE);
+
+    for (curVA; curVA < endVA; curVA += PGSIZE, tempRegion += PGSIZE) {
+      if (!(pg = page_lookup(curenv->env_pgdir, (void *)tempRegion, 0)) ||
+          page_insert(curenv->env_pgdir, pg, (void *)curVA, perm) < 0) 
+        return -E_NO_MEM;
+
+      page_remove(curenv->env_pgdir, (void *)tempRegion);
+    }
+  }
+
+  if (!(pg = page_lookup(curenv->env_pgdir, (void *)tempRegion, 0)) ||
+      page_insert(curenv->env_pgdir, pg, (void *)(USTACKTOP - PGSIZE), PTE_P | PTE_W | PTE_U) < 0) 
+    return -E_NO_MEM;
+
+  page_remove(curenv->env_pgdir, (void *)tempRegion);
+  
+  env_run(curenv);
+  return 0;
+}
+
 // Dispatches to the correct kernel function, passing the arguments.
 int32_t
 syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5)
@@ -398,6 +461,8 @@ syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, 
       return sys_exofork();
     case (SYS_env_set_status) :
       return sys_env_set_status(a1, a2);
+    case (SYS_env_set_trapframe) :
+      return sys_env_set_trapframe(a1, (struct Trapframe *)a2);
     case (SYS_env_set_pgfault_upcall) :
       return sys_env_set_pgfault_upcall(a1, (void *)a2);
     case (SYS_page_alloc) :
@@ -410,6 +475,8 @@ syscall(uint32_t syscallno, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, 
       return sys_ipc_try_send(a1, a2, (void *)a3, a4);
     case (SYS_ipc_recv) :
       return sys_ipc_recv((void *)a1);
+    case (SYS_exec) :
+      return sys_exec(a1, a2, (void *)a3, a4);
     default:
       return -E_INVAL;
   }

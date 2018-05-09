@@ -1,0 +1,52 @@
+1.	You do not have to do anything else to ensure that the I/O privilege 
+	setting is properly saved and restored when switching between environments. 
+	This is because the trapframe of different environments are kept separate. 
+	These trapframes are then popped/pushed off/on the stack when switching 
+	environments, so there's no chance of any environment's trapframe affecting
+	another environment's trapframe.
+
+--------------------------------------------------------------------------------
+
+Challenge - Implement Unix-style exec
+
+The difficulty in implementing a Unix-style exec comes from the fact that exec 
+creates a subprocess, unlike how spawn creates an entirely new process. As a 
+result, exec still needs to copy a program's code and data to memory, but the 
+problem is that the address space for the process under which exec creates a 
+subprocess is already in use. In order to implement exec, a temporary region of 
+memory is needed to store and read the program until it gets mapped properly. 
+
+As for my actualy implementation, most of the code needed was able to be copied 
+from spawn with minimal modifications. The procedure for an exec starts with 
+execl() which is almost identical to spawnl(), except execl() return with exec()
+instead of spawn(). In exec(), the code is also similar to spawn, but instead of
+copying the ELF to a new child environment, we copy it to the temporary region 
+in the current environment, which, in my implementation, is the empty memory at 
+virtual address 0x0. exec() also calls a modified version of init_stack(), 
+init_stack_exec(), that is also nearly identical to its spawn counterpart except
+it takes into account this temporary region. Finally, it makes a call to 
+sys_exec() which copies pages from the temporary region to their final location 
+before unmapping them from the temporary region and running the designated 
+program.
+
+I made a modified version of spawnhello.c, exechello.c, that simply exec's 
+hello.c instead spawning it to test my implementation of exec. The full calling 
+order is as follows:
+
+user/exechello.c -> lib/spawn.c:execl() -> lib/spawn.c:exec() -> 
+lib/spawn.c:init_stack_exec(), lib/syscall.c:sys_exec() -> lib/syscall.c:syscall() -> 
+kern/syscall.c:syscall() -> kern/syscall.c:sys_exec() -> user/hello.c
+
+As a result, exec properly runs hello.c in the same environment as its "parent."
+
+Output:
+jesse@ubuntu:~/Documents/CS-3210/lab$ make run-exechello
+...
+i am parent environment 00001001, exec'ing hello
+...
+hello, world
+i am environment 00001001
+No runnable environments in the system!
+Welcome to the JOS kernel monitor!
+Type 'help' for a list of commands.
+K> 
