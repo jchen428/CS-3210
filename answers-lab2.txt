@@ -1,0 +1,65 @@
+1.	The pointer returned by return_a_pointer() must be a virtual address. Since
+	it's getting dereferenced and assumed to be correct, x has to be a 
+	uintptr_t. Otherwise, a physical address would be interpreted at the wrong
+	virtual address.
+
+2.	+-------+----------------------+-------------------------------------------+
+	| Entry | Base Virtual Address | Points to (logically)                     |
+	+=======+======================+===========================================+
+	|  1023 | 0xffc00000           | Page table for top 4MB of phys memory     |
+	+-------+----------------------+-------------------------------------------+
+	|   ... | ...                  | ...                                       |
+	+-------+----------------------+-------------------------------------------+
+	|   960 | 0xf0000000           | KERNBASE                                  |
+	+-------+----------------------+-------------------------------------------+
+	|   959 | 0xefc00000           | KSTACKTOP-PTSIZE                          |
+	+-------+----------------------+-------------------------------------------+
+	|   ... | ...                  | ...                                       |
+	+-------+----------------------+-------------------------------------------+
+	|   956 | 0xef000000           | UPAGES                                    |
+	+-------+----------------------+-------------------------------------------+
+	|   ... | ...                  | ...                                       |
+	+-------+----------------------+-------------------------------------------+
+	|     0 | 0x00000000           | [see next question]                       |
+	+-------+----------------------+-------------------------------------------+
+
+3.	User programs cannot access the kernel's memory due to memory isolation in 
+	the virtual address space that protect the kernel's memory. This is achieved 
+	by the 12 permission bits in each page table entry.
+
+4.	The maximum amount of physical memory that this operating system can support 
+	is 4GB because 0xffffffff is the highest adressable location in this 32-bit 
+	address space.
+
+5.	Space overhead includes managing space for page directories, page tables,
+	and pages. If we actually had 4GB of physical memory, there would be
+	4KB for the page directory + 4KB of page tables + 4MB of PageInfo structs.
+
+6.	EIP transitions to running above KERNBASE after the "jmp *%eax" instruction 
+	in entry.S.	entry_pgtable in entrypgdir.c makes it possible to continue 
+	executing at a low EIP because it maps physical addresses [0, 4MB) to 
+	virtual addresses [KERNBASE, KERNBASE+4MB). This transition is necessary 
+	because entry_pgtable will be discarded when the rest of the kernel is 
+	mapped beyond KERNBASE+4MB.
+
+--------------------------------------------------------------------------------
+
+Challenge - Extending JOS kernel monitor commands
+
+The following monitor commads were added to the kernel:
+	showmappings
+	setflags
+	memdump
+
+showmappings lists out virtual adresses and their physical page mappings, along 
+with each page's permission flags. This was done by using pgdir_walk at PGSIZE
+intervals from a starting address and ending address to get the PTEs of each 
+page.
+
+setflags changes the permission flags at a particular mapping to a user-given
+value. pgdir_walk was used again to retrieve the relevant PTE. Then, the lowest 
+12 bits of the PTE were set to 0 before finally being set to the given values.
+
+memdump dumps the contents of a given range of memory. This command simply steps
+through individual memory locations from a starting address to an ending address
+and prints its contents.

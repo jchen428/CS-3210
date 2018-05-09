@@ -10,6 +10,7 @@
 #include <kern/console.h>
 #include <kern/monitor.h>
 #include <kern/kdebug.h>
+#include <kern/pmap.h>
 
 #define CMDBUF_SIZE 80 // enough for one VGA text line
 
@@ -22,9 +23,12 @@ struct Command {
 };
 
 static struct Command commands[] = {
-  { "help",      "Display this list of commands",        mon_help       },
-  { "info-kern", "Display information about the kernel", mon_infokern   },
-  { "backtrace", "Display current stacktrace",           mon_backtrace  },
+  { "help",      "Display this list of commands",               mon_help         },
+  { "info-kern", "Display information about the kernel",        mon_infokern     },
+  { "backtrace", "Display current stacktrace",                  mon_backtrace    },
+  { "showmappings", "Display a range of kernel page mappings",  mon_showmappings },
+  { "setflags", "Set permission flags of a page mapping",       mon_setflags     },
+  { "memdump", "Dump the contents of a range of memory",        mon_memdump      },
 };
 #define NCOMMANDS (sizeof(commands)/sizeof(commands[0]))
 
@@ -87,7 +91,96 @@ mon_backtrace(int argc, char **argv, struct Trapframe *tf)
   return 0;
 }
 
+int
+mon_showmappings(int argc, char **argv, struct Trapframe *tf)
+{
+  if (argc != 3) {
+    cprintf("showmappings [start_addr] [end_addr]\n");
+    return 0;
+  }
 
+  uint32_t start = strtol(argv[1], NULL, 16);
+  uint32_t end = strtol(argv[2], NULL, 16);
+  uint32_t curr = start;
+
+  if (start >= end) {
+    cprintf("end_addr must be greater than start_addr\n");
+    return 0;
+  }
+
+  cprintf("start_addr = 0x%08x, end_addr = 0x%08x\n", start, end);
+  cprintf("VA\t\t->\tPA\t\tPermissions\n");
+  cprintf("--------------------------------------------------------\n");
+
+  while (curr < end) {
+    cprintf("0x%08x\t->\t", curr);
+    pte_t *pte = pgdir_walk(kern_pgdir, (void *)curr, 0);
+
+    if (!pte || !(*pte & PTE_P))
+      cprintf("N/A\n");
+
+    cprintf("0x%08x\t0x%03x\n", (uint32_t)PTE_ADDR(*pte), *pte & 0xfff);
+    curr += PGSIZE;
+  }
+
+  return 0;
+}
+
+int
+mon_setflags(int argc, char **argv, struct Trapframe *tf)
+{
+  if (argc != 3) {
+    cprintf("setflags [addr] [flags]\n");
+    return 0;
+  }
+
+  uint32_t va = strtol(argv[1], NULL, 16);
+  uint32_t flags = strtol(argv[2], NULL, 16);
+  pte_t *pte = pgdir_walk(kern_pgdir, (void *)va, 0);
+
+  if (!pte) {
+    cprintf("No page mapping at 0x%08x\n", va);
+    return 0;
+  }
+
+  cprintf("Old flags: 0x%08x\n", *pte & 0xfff);
+
+  *pte &= ~0xfff;
+  *pte |= flags;
+
+  cprintf("New flags: 0x%08x\n", *pte & 0xfff);
+
+  return 0;
+}
+
+int
+mon_memdump(int argc, char **argv, struct Trapframe *tf)
+{
+  if (argc != 3) {
+    cprintf("memdump [start_addr] [end_addr]\n");
+    return 0;
+  }
+
+  uint32_t start = strtol(argv[1], NULL, 16);
+  uint32_t end = strtol(argv[2], NULL, 16);
+  uint32_t curr = start;
+
+  if (start >= end || start < 0 || end > 0xffffffff) {
+    cprintf("end_addr must be greater than start_addr\n");
+    return 0;
+  }
+
+  cprintf("start_addr = 0x%08x, end_addr = 0x%08x\n", start, end);
+  cprintf("Address\t\t->\tValue\n");
+  cprintf("---------------------------------------\n");
+
+  while (curr < end) {
+    cprintf("0x%08x\t->\t0x%08x\n", curr, *(void **)curr);
+    curr++;
+  }
+
+  return 0;
+}
 
 /***** Kernel monitor command interpreter *****/
 
