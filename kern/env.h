@@ -4,9 +4,10 @@
 #define JOS_KERN_ENV_H
 
 #include <inc/env.h>
+#include <kern/cpu.h>
 
 extern struct Env *envs;		// All environments
-extern struct Env *curenv;		// Current environment
+#define curenv (thiscpu->cpu_env)		// Current environment
 extern struct Segdesc gdt[];
 
 void	env_init(void);
@@ -14,6 +15,7 @@ void	env_init_percpu(void);
 int	env_alloc(struct Env **e, envid_t parent_id);
 void	env_free(struct Env *e);
 void	env_create(uint8_t *binary, enum EnvType type);
+void	env_create_with_priority(uint8_t *binary, enum EnvType type, int pri);
 void	env_destroy(struct Env *e);	// Does not return if e == curenv
 
 int	envid2env(envid_t envid, struct Env **env_store, bool checkperm);
@@ -31,5 +33,14 @@ void	env_pop_tf(struct Trapframe *tf) __attribute__((noreturn));
 		env_create(ENV_PASTE3(_binary_obj_, x, _start),		\
 			   type);					\
 	} while (0)
+
+// Lab 4 priority scheduling challenge
+#define ENV_CREATE_WITH_PRIORITY(x, type, pri)						\
+	do {								\
+		extern uint8_t ENV_PASTE3(_binary_obj_, x, _start)[];	\
+		env_create_with_priority(ENV_PASTE3(_binary_obj_, x, _start),		\
+			   type, pri);					\
+	} while (0)
+// -----------------------------------
 
 #endif // !JOS_KERN_ENV_H

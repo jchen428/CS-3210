@@ -11,9 +11,11 @@
 #include <kern/pmap.h>
 #include <kern/trap.h>
 #include <kern/monitor.h>
+#include <kern/sched.h>
+#include <kern/cpu.h>
+#include <kern/spinlock.h>
 
 struct Env *envs = NULL;                // All environments
-struct Env *curenv = NULL;              // The current env
 static struct Env *env_free_list;       // Free environment list
                                         // (linked by Env->env_link)
 
@@ -34,7 +36,7 @@ static struct Env *env_free_list;       // Free environment list
 // definition of gdt specifies the Descriptor Privilege Level (DPL)
 // of that descriptor: 0 for kernel and 3 for user.
 //
-struct Segdesc gdt[] =
+struct Segdesc gdt[NCPU + 5] =
 {
   // 0x0 - unused (always faults -- for trapping NULL far pointers)
   SEG_NULL,
@@ -51,7 +53,8 @@ struct Segdesc gdt[] =
   // 0x20 - user data segment
   [GD_UD >> 3] = SEG(STA_W, 0x0, 0xffffffff, 3),
 
-  // 0x28 - tss, initialized in trap_init_percpu()
+  // Per-CPU TSS descriptors (starting from GD_TSS0) are initialized
+  // in trap_init_percpu()
   [GD_TSS0 >> 3] = SEG_NULL
 };
 
@@ -237,6 +240,7 @@ env_alloc(struct Env **newenv_store, envid_t parent_id)
   e->env_type = ENV_TYPE_USER;
   e->env_status = ENV_RUNNABLE;
   e->env_runs = 0;
+  e->priority = 99;   // Lab 4 priority scheduling challenge
 
   // Clear out all the saved register state,
   // to prevent the register values
@@ -258,6 +262,81 @@ env_alloc(struct Env **newenv_store, envid_t parent_id)
   e->env_tf.tf_esp = USTACKTOP;
   e->env_tf.tf_cs = GD_UT | 3;
   // You will set e->env_tf.tf_eip later.
+
+  // Enable interrupts while in user mode.
+  // LAB 4: Your code here. -- DONE
+  e->env_tf.tf_eflags |= FL_IF;
+
+  // Clear the page fault handler until user installs one.
+  e->env_pgfault_upcall = 0;
+
+  // Also clear the IPC receiving flag.
+  e->env_ipc_recving = 0;
+
+  // commit the allocation
+  env_free_list = e->env_link;
+  *newenv_store = e;
+
+  cprintf("[%08x] new env %08x\n", curenv ? curenv->env_id : 0, e->env_id);
+  return 0;
+}
+
+// Lab 4 priority scheduling challenge
+int
+env_alloc_with_priority(struct Env **newenv_store, envid_t parent_id, int pri)
+{
+  struct Env *e = env_free_list;
+  if (!e)
+    return -E_NO_FREE_ENV;
+
+  // Allocate and set up the page directory for this environment.
+  int r = env_setup_vm(e);
+  if (r < 0)
+    return r;
+
+  // Generate an env_id for this environment.
+  int32_t gen = (e->env_id + (1 << ENVGENSHIFT)) & ~(NENV - 1);
+  if (gen <= 0) // Don't create a negative env_id.
+    gen = 1 << ENVGENSHIFT;
+  e->env_id = gen | (e - envs);
+
+  // Set the basic status variables.
+  e->env_parent_id = parent_id;
+  e->env_type = ENV_TYPE_USER;
+  e->env_status = ENV_RUNNABLE;
+  e->env_runs = 0;
+  e->priority = pri;
+
+  // Clear out all the saved register state,
+  // to prevent the register values
+  // of a prior environment inhabiting this Env structure
+  // from "leaking" into our new environment.
+  memset(&e->env_tf, 0, sizeof(e->env_tf));
+
+  // Set up appropriate initial values for the segment registers.
+  // GD_UD is the user data segment selector in the GDT, and
+  // GD_UT is the user text segment selector (see inc/memlayout.h).
+  // The low 2 bits of each segment register contains the
+  // Requestor Privilege Level (RPL); 3 means user mode.  When
+  // we switch privilege levels, the hardware does various
+  // checks involving the RPL and the Descriptor Privilege Level
+  // (DPL) stored in the descriptors themselves.
+  e->env_tf.tf_ds = GD_UD | 3;
+  e->env_tf.tf_es = GD_UD | 3;
+  e->env_tf.tf_ss = GD_UD | 3;
+  e->env_tf.tf_esp = USTACKTOP;
+  e->env_tf.tf_cs = GD_UT | 3;
+  // You will set e->env_tf.tf_eip later.
+
+  // Enable interrupts while in user mode.
+  // LAB 4: Your code here. -- DONE
+  e->env_tf.tf_eflags |= FL_IF;
+
+  // Clear the page fault handler until user installs one.
+  e->env_pgfault_upcall = 0;
+
+  // Also clear the IPC receiving flag.
+  e->env_ipc_recving = 0;
 
   // commit the allocation
   env_free_list = e->env_link;
@@ -372,7 +451,6 @@ load_icode(struct Env *e, uint8_t *binary)
   }
 
   e->env_tf.tf_eip = ELFHDR->e_entry;
-  e->env_tf.tf_eflags = ELFHDR->e_flags;
   lcr3(PADDR(kern_pgdir));
 
   // Now map one page for the program's initial stack
@@ -399,8 +477,28 @@ env_create(uint8_t *binary, enum EnvType type)
     panic("env_create: failed to allocate new enviornment");
 
   env->env_type = type;
+  env->priority = 99;     // Lab 4 priority scheduling challenge
   load_icode(env, binary);
 }
+
+//
+// Lab 4 priority scheduling challenge
+//
+void
+env_create_with_priority(uint8_t *binary, enum EnvType type, int pri)
+{
+  struct Env *env;
+
+  if (env_alloc_with_priority(&env, 0, pri) != 0)
+    panic("env_create: failed to allocate new enviornment");
+  if (pri < 0 || pri > 99)
+    panic("env create: environment priority must be [0, 99]");
+
+  env->env_type = type;
+  env->priority = pri;
+  load_icode(env, binary);
+}
+// -----------------------------------
 
 //
 // Frees env e and all memory it uses.
@@ -456,15 +554,26 @@ env_free(struct Env *e)
 
 //
 // Frees environment e.
+// If e was the current env, then runs a new environment (and does not return
+// to the caller).
 //
 void
 env_destroy(struct Env *e)
 {
+  // If e is currently running on other CPUs, we change its state to
+  // ENV_DYING. A zombie environment will be freed the next time
+  // it traps to the kernel.
+  if (e->env_status == ENV_RUNNING && curenv != e) {
+    e->env_status = ENV_DYING;
+    return;
+  }
+
   env_free(e);
 
-  cprintf("Destroyed the only environment - nothing more to do!\n");
-  while (1)
-    monitor(NULL);
+  if (curenv == e) {
+    curenv = NULL;
+    sched_yield();
+  }
 }
 
 
@@ -477,6 +586,9 @@ env_destroy(struct Env *e)
 void
 env_pop_tf(struct Trapframe *tf)
 {
+  // Record the CPU we are running on for user-space debugging
+  curenv->env_cpunum = cpunum();
+
   __asm __volatile("movl %0,%%esp\n"
                    "\tpopal\n"
                    "\tpopl %%es\n"
@@ -521,6 +633,9 @@ env_run(struct Env *e)
   curenv->env_status = ENV_RUNNING;
   curenv->env_runs++;
   lcr3(PADDR(curenv->env_pgdir));
+
+  unlock_kernel();
+
   env_pop_tf(&(e->env_tf));
 }
 

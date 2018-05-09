@@ -1,0 +1,102 @@
+1.	The purpose of MPBOOTPHYS is to translate the high addresses that mpentry.S 
+	is linked to to the low addresses that boot_aps() in init.c is linked to. 
+	Since boot_aps() loads mpentry.S from low to high addresses, this 
+	translation is necessary. However, boot.S is already both linked and loaded 
+	at the same low address, so it doesn't need to use MPBOOTPHYS. If MPBOOTPHYS
+	was omitted in mpentry.S, then mpentry.S won't be able to reference the 
+	correct symbols at the correct addresses.
+
+2.	When a trap or interrupt is triggered, the trapframe is immediately pushed 
+	onto the stack without checking if the lock is being held. As a result, 
+	different CPUs will end up pushing their own stackframes onto the same 
+	kernel stack and corrupting each other. So, we'd still need separate kernel 
+	stacks for each CPU to prevent this.
+
+3.	The pointer e can be dereferenced both before and after the address 
+	switching because all user environment reside within UENVS of virtual memory
+	which is identical across all virtual memory contexts.
+
+4.	The kernel saves an old environment's registers so the environment can be 
+	resumed later. The environment's registers are saved on its own stack when 
+	it gets interrupted.
+
+--------------------------------------------------------------------------------
+
+Challenge - Adding fixed-priority scheduling
+
+Adding fixed-priority scheduling mostly involved modifying sched_yield() in 
+sched.c. In order to set this up though, I first had to add a priority component
+to struct Env in inc/env.h. This value is an integer between [0, 100].
+
+uint32_t priority;
+
+To maintain compatibility with the old round-robin scheduling, env_alloc() and env_create() in 
+kern/env.c had to be modified slightly to set a default minimum priority of 99.
+
+env->priority = 99;
+
+Then, a copy of both env_alloc() and env_create() was made with an extra 
+priority parameter that is used to initialize a new environment's priority.
+
+Just like env_create(), env_create_with_priority() also needs a corresponding 
+macro in kern/env.h.
+
+#define ENV_CREATE_WITH_PRIORITY(x, type, pri)						\
+	do {								\
+		extern uint8_t ENV_PASTE3(_binary_obj_, x, _start)[];	\
+		env_create_with_priority(ENV_PASTE3(_binary_obj_, x, _start),		\
+			   type, pri);					\
+	} while (0)
+
+With the prep out of the way, sched_yield() could be modified to find the 
+highest priority environment to run. Higher priority environments will always 
+run and finish before lower priority environments. Additionally, environments 
+with equal priorities still share the CPU as in standard round-robin.
+
+void
+sched_yield(void)
+{
+  struct Env *idle;
+
+  int startingEnv = curenv ? ENVX(curenv->env_id) % NENV : 0;
+  int inc = curenv ? 1 : 0;
+
+  struct Env *highestEnv = NULL;
+  struct Env *nextEqualEnv = NULL;
+  int highestPri = curenv ? curenv->priority : 100;
+  
+  for (inc; inc < NENV; inc++) {
+    int i = (startingEnv + inc) % NENV;
+
+    if (envs[i].env_status == ENV_RUNNABLE) {
+      if (envs[i].priority < highestPri) {
+        highestPri = envs[i].priority;        
+        highestEnv = &envs[i];
+        nextEqualEnv = NULL;
+      } else if (!nextEqualEnv && envs[i].priority == highestPri) {
+        nextEqualEnv = &envs[i];
+      }
+    }
+  }
+
+  if (highestEnv) {
+    env_run(highestEnv);
+  } else if (nextEqualEnv) {
+    env_run(nextEqualEnv);
+  } else if (curenv && curenv->env_status == ENV_RUNNING) {
+    env_run(curenv);
+  }
+
+  sched_halt();
+}
+
+To test this, I simply ran five instances of user_yield with varying priorities 
+in i386_init() in init.c
+
+ENV_CREATE_WITH_PRIORITY(user_yield, ENV_TYPE_USER, 50);  //0
+ENV_CREATE_WITH_PRIORITY(user_yield, ENV_TYPE_USER, 2);   //1
+ENV_CREATE_WITH_PRIORITY(user_yield, ENV_TYPE_USER, 68);  //2
+ENV_CREATE_WITH_PRIORITY(user_yield, ENV_TYPE_USER, 69);  //3
+ENV_CREATE_WITH_PRIORITY(user_yield, ENV_TYPE_USER, 43);  //4
+
+As expected, these run and finishes in the order 1, 4, 0, 2, 3.
